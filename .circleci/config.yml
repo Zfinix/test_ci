@@ -1,32 +1,122 @@
 version: 2
 jobs:
-  build:    
-    docker:
-      - image: cirrusci/flutter:v1.5.8 
-
-    branches:
-      only: master
-
+   android_tests:
+    working_directory: ~/project/android
+    macos:
+      xcode: "9.4.0"
+    environment:
+      JVM_OPTS: -Xmx3200m
     steps:
-      - checkout
-
+      - checkout:
+          path: ~/project
+      - restore_cache:
+          keys: 
+            - android_cache
       - run:
-          name: Run Flutter doctor
-          command: flutter doctor
-
+          name: Setup environment variables
+          command: |
+            echo 'export PATH="$PATH:/usr/local/opt/node@8/bin:${HOME}/.yarn/bin:${HOME}/${CIRCLE_PROJECT_REPONAME}/node_modules/.bin:/usr/local/share/android-sdk/tools/bin"' >> $BASH_ENV
+            echo 'export ANDROID_HOME="/usr/local/share/android-sdk"' >> $BASH_ENV
+            echo 'export ANDROID_SDK_HOME="/usr/local/share/android-sdk"' >> $BASH_ENV
+            echo 'export ANDROID_SDK_ROOT="/usr/local/share/android-sdk"' >> $BASH_ENV
+            echo 'export QEMU_AUDIO_DRV=none' >> $BASH_ENV
+            echo 'export JAVA_HOME=/Library/Java/Home' >> $BASH_ENV
+            echo 'export PATH="$PATH:`pwd`/flutter/bin"'  >> $BASH_ENV
       - run:
-          name: Run the application tests
-          command: flutter test
-
+          name: Install Android sdk
+          command: |
+            HOMEBREW_NO_AUTO_UPDATE=1 brew tap homebrew/cask
+            HOMEBREW_NO_AUTO_UPDATE=1 brew cask install android-sdk
       - run:
-          name: Build the Android version
-          command: flutter build apk 
+          name: Install emulator dependencies
+          command: (yes | sdkmanager "platform-tools" "platforms;android-26" "extras;intel;Hardware_Accelerated_Execution_Manager" "build-tools;26.0.0" "system-images;android-26;google_apis;x86" "emulator" --verbose) || true
+      - run:
+          name: chmod permissions
+          command: chmod +x ./gradlew
+     # - run: avdmanager create avd -n Pixel_2_API_26 -k "system-images;android-26;google_apis;x86" -g google_apis -d "Nexus 5"
+     # - run:
+     #     name: Run emulator in background
+     #     command: /usr/local/share/android-sdk/tools/emulator @Pixel_2_API_26 -noaudio -no-boot-anim -no-window
+     #     background: true
+      - run:
+          name: download flutter SDK
+          command: if ! test -f "flutter_sdk.zip"; then curl -o flutter_sdk.zip https://storage.googleapis.com/flutter_infra/releases/stable/macos/flutter_macos_v1.5.4-hotfix.2-stable.zip; fi
+      - run:
+          name: unzip flutter SDK
+          command: unzip flutter_sdk.zip
+      - run: 
+          name: Flutter build
+          command: cd ..; flutter build aot
+      - run:
+          name: Download Android Dependencies
+          command: ./gradlew androidDependencies
+      # - run:
+      #     name: Run UI Tests
+      #     command: ./gradlew app:connectedAndroidTest
+      - run:
+          name: Run Unit Tests
+          command: ./gradlew test
+      - save_cache:
+          key: android_cache
+          paths:
+            - ~/.gradle
+            - flutter_sdk.zip
 
-      - store_artifacts:
-          path: build/app/outputs/apk/release/app-release.apk
-          
+   ios_tests:
+    macos:
+      xcode: "10.2.0"
+    working_directory: ~/project/ios
+    environment:
+      FL_OUTPUT_DIR: output
+    steps:
+      - checkout:
+          path: ~/project
+      - restore_cache:
+          keys: 
+            - flutter-cache
+      - run:
+          name: download flutter SDK
+          command: if ! test -f "flutter_sdk.zip"; then curl -o flutter_sdk.zip https://storage.googleapis.com/flutter_infra/releases/stable/macos/flutter_macos_v1.5.4-hotfix.2-stable.zip; fi
+      - run:
+          name: unzip flutter SDK
+          command: unzip flutter_sdk.zip
+      - run:
+          name: export flutter path
+          command: echo 'export PATH="$PATH:`pwd`/flutter/bin"'  >> $BASH_ENV 
+      - run:
+          name: Fetch CocoaPods Specs
+          command: curl https://cocoapods-specs.circleci.com/fetch-cocoapods-repo-from-s3.sh  | bash -s cf
+      - run: flutter doctor
+      - run: 
+          name: Flutter build
+          command: cd ..; flutter build aot
+      - run:
+          name: Update CocoaPods
+          command: pod update
+      - run:
+          name: Install CocoaPods
+          command: pod install --repo-update
+      - run:
+          name: Build and run tests
+          command:  xcodebuild   -workspace Runner.xcworkspace   -scheme Runner   -sdk iphonesimulator   -destination 'platform=iOS Simulator,name=iPhone X,OS=12.2'   test | xcpretty
+      - save_cache:
+          key: flutter-cache
+          paths:
+            - flutter_sdk.zip
+            - Pods
+
+  
 workflows:
   version: 2
-  build_and_test:
+  build-test-and-approval-deploy:
     jobs:
-      - build
+      - android_tests
+      - ios_tests
+      - hold:
+          context: cross-platform
+          requires:
+            - android_tests
+            - ios_tests
+          filters:
+            branches:
+              only: master
